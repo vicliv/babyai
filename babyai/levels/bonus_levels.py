@@ -1,5 +1,6 @@
 import gym
-from gym_minigrid.envs import Key, Ball, Box
+import json
+from gym_minigrid.envs import Key, Ball, Box, Door, IDX_TO_COLOR, IDX_TO_OBJECT
 from .verifier import *
 from .levelgen import *
 
@@ -1025,6 +1026,267 @@ class Level_OpenDoorsOrderN4Debug(OpenDoorsOrder):
             debug=True, 
             **kwargs
         )
+
+class Level_JSON(RoomGridLevel):
+    """
+    Generate a level from the level_config.json file
+    """
+
+    def __init__(self, **kwargs):
+
+        with open('level_config.json') as json_file:
+            self.data = json.load(json_file)
+        super().__init__( 
+            num_rows=self.data['num_rows'],
+            num_cols=self.data['num_columns'],
+            room_size=self.data['room_size'], 
+            **kwargs
+        )
+
+    def gen_mission(self):
+        i = self.data['agent']['room'][0]
+        j = self.data['agent']['room'][1]
+        pos = np.array(self.data['agent']['pos'])
+        dir = self.data['agent']['dir']
+
+        room = self.get_room(i, j)
+        
+        self.agent_pos = room.top + pos
+
+        self.agent_dir = dir
+        
+        for object in self.data['objects']:
+            i = object['i']
+            j = object['j']
+            kind=object['type']
+            color=object['color']
+            pos=np.array(object['pos'])
+
+            assert kind in ['key', 'ball', 'box']
+            if kind == 'key':
+                obj = Key(color)
+            elif kind == 'ball':
+                obj = Ball(color)
+            elif kind == 'box':
+                obj = Box(color)
+            
+            room = self.get_room(i, j)
+            top = room.top
+
+            pos = pos + top
+            self.put_obj(obj, pos[0], pos[1])
+            
+            room.objs.append(obj)
+            
+
+        for door in self.data['doors']:
+            i = door['i']
+            j = door['j']
+            door_idx = door['idx']
+            color = door['color']
+            locked = door['locked']
+            pos= door['pos']
+
+            room = self.get_room(i, j)
+            
+            assert room.doors[door_idx] is None, "door already exists"
+
+            room.locked = locked
+            door = Door(color, is_locked=locked)
+
+            x_l, y_l = (room.top[0] + 1, room.top[1] + 1)
+            x_m, y_m = (room.top[0] + room.size[0] - 1, room.top[1] + room.size[1] - 1)
+            
+            if door_idx == 0:
+                pos = (x_m, room.top[1] + pos)
+            if door_idx == 1:
+                pos = (room.top[0] + pos, y_m)
+            if door_idx == 2:
+                pos = (x_l, room.top[1] + pos)
+            if door_idx == 3:
+                pos = (room.top[0] + pos, y_l)
+            
+            room.door_pos[door_idx] = pos
+
+            self.grid.set(*pos, door)
+            door.cur_pos = pos
+
+            neighbor = room.neighbors[door_idx]
+            room.doors[door_idx] = door
+            neighbor.doors[(door_idx+2) % 4] = door
+
+        self.instrs = self.parse_instr(self.data['instr'].split())
+    
+    def get_object(self, instr):
+        """
+        Find an object based on the parsed string given in the JSON file
+        """
+        type = None
+        color = None
+        loc = None
+
+        for s in instr:
+            if s in COLOR_NAMES:
+                color = s
+            elif s in OBJ_TYPES:
+                type = s
+            elif s in LOC_NAMES:
+                loc = s
+
+        return ObjDesc(type, color, loc)
+
+
+    def parse_instr(self, instr):
+        """
+        Create the instruction based on the string given in the JSON file
+        """
+        for i, s in enumerate(instr):
+            if 'then' == s:
+                return BeforeInstr(self.parse_instr(instr[0:i]), self.parse_instr(instr[i+1:]))
+            elif 'after' == s:
+                return AfterInstr(self.parse_instr(instr[0:i]), self.parse_instr(instr[i+2:]))
+        
+        for i, s in enumerate(instr):
+            if 'and' == s:
+                return AndInstr(self.parse_instr(instr[0:i]), self.parse_instr(instr[i+1:]))
+        
+        for i, s in enumerate(instr):
+            if 'go' == s:
+                return GoToInstr(self.get_object(instr[i+2:]))
+            elif 'pick' == s:
+                return PickupInstr(self.get_object(instr[i+2:]))
+            elif 'open' == s:
+                return OpenInstr(self.get_object(instr[i+1:]))
+            elif 'put' == s:
+                for j, st in enumerate(instr[i+1:]):
+                    if st == 'next':
+                        return PutNextInstr(self.get_object(instr[i+1:i+1+j]), self.get_object(instr[j+2:]))
+                
+class Level_parametrized(LevelGen):
+    """
+    Create a level based on a vector of dimension 189
+    """
+    def __init__(self, **kwargs):
+        print(kwargs)
+        if ('vector' not in kwargs.keys()):
+            with open('vector_config.json') as json_file:
+                self.data = np.array(json.load(json_file))
+        else:
+            self.data = kwargs['vector']
+
+        super().__init__( 
+            num_rows = self.data[0] if self.data[0] <= 3 else 3,
+            num_cols = self.data[1] if self.data[1] <= 3 else 3,
+            room_size = self.data[2] if self.data[2] <= 8 else 8, 
+            **kwargs
+        )
+    
+    def gen_mission(self):
+        room = self.get_room(self.data[3],self.data[4])
+        
+        self.agent_pos = room.top + np.array([self.data[5], self.data[6]])
+        self.agent_dir = self.data[7]
+        
+        objs = []
+        for i in range(8, 116, 6):
+            if self.data[i] == -1:
+                continue
+
+            kind = IDX_TO_OBJECT[self.data[i+2]]
+            color=IDX_TO_COLOR[self.data[i+3]]
+            pos=np.array([self.data[i+4], self.data[i+5]])
+            
+            assert kind in ['key', 'ball', 'box']
+            if kind == 'key':
+                obj = Key(color)
+            elif kind == 'ball':
+                obj = Ball(color)
+            elif kind == 'box':
+                obj = Box(color)
+            
+            assert kind in ['key', 'ball', 'box']
+            if kind == 'key':
+                obj = Key(color)
+            elif kind == 'ball':
+                obj = Ball(color)
+            elif kind == 'box':
+                obj = Box(color)
+            
+            room = self.get_room(self.data[i], self.data[i+1])
+            top = room.top
+
+            pos = pos + top
+            self.put_obj(obj, pos[0], pos[1])
+            
+            room.objs.append(obj)
+            
+            objs.append([IDX_TO_OBJECT[self.data[i+2]], IDX_TO_COLOR[self.data[i+3]]])
+
+        doors = []
+        for i in range(116, 188, 6):
+            if self.data[i] == -1:
+                continue
+            
+            room = self.get_room(self.data[i], self.data[i+1])
+
+            color = IDX_TO_COLOR[self.data[i+3]]
+            locked = self.data[i+4]
+            pos = self.data[i+5]
+            door_idx = self.data[i+2]
+            
+            assert room.doors[door_idx] is None, "door already exists"
+
+            room.locked = locked
+            door = Door(color, is_locked=locked)
+
+            x_l, y_l = (room.top[0] + 1, room.top[1] + 1)
+            x_m, y_m = (room.top[0] + room.size[0] - 1, room.top[1] + room.size[1] - 1)
+            
+            if door_idx == 0:
+                pos = (x_m, room.top[1] + pos)
+            if door_idx == 1:
+                pos = (room.top[0] + pos, y_m)
+            if door_idx == 2:
+                pos = (x_l, room.top[1] + pos)
+            if door_idx == 3:
+                pos = (room.top[0] + pos, y_l)
+            
+            room.door_pos[door_idx] = pos
+
+            self.grid.set(*pos, door)
+            door.cur_pos = pos
+
+            neighbor = room.neighbors[door_idx]
+            room.doors[door_idx] = door
+            neighbor.doors[(door_idx+2) % 4] = door
+
+            doors.append(IDX_TO_COLOR[self.data[i+3]])
+        
+        if self.data[188] == 0:
+            obj = self._rand_elem(objs)
+            self.instrs = GoToInstr(ObjDesc(obj[0], obj[1]))
+        elif self.data[188] == 1:
+            obj = self._rand_elem(objs)
+            self.instrs =  PickupInstr(ObjDesc(obj[0], obj[1]))
+        elif self.data[188] == 2:
+            color = self._rand_elem(doors)
+            self.instrs = OpenInstr(ObjDesc("door", color))
+        elif self.data[188] == 3:
+            o1, o2 = self._rand_subset(objs, 2)
+            self.instrs = PutNextInstr(
+            ObjDesc(o1[0], o1[1]),
+            ObjDesc(o2[0], o2[1])
+            )
+        elif self.data[188] == 4:
+            self.instrs = self.rand_instr(
+            action_kinds= ['goto'],
+            instr_kinds=self.instr_kinds
+            )
+        else:
+            self.instrs = self.rand_instr(
+            action_kinds= self.action_kinds,
+            instr_kinds=self.instr_kinds
+            )
 
 for name, level in list(globals().items()):
     if name.startswith('Level_'):
